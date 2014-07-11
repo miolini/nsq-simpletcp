@@ -47,7 +47,7 @@ func main() {
 		return workerListener(*listenAddr, dataChan, *decompress)
 	})
 
-	godaemon.NewWorker("publisher", 4, time.Second).Start(func(worker *godaemon.Worker) (err error) {
+	godaemon.NewWorker("publisher", cpus, time.Second).Start(func(worker *godaemon.Worker) (err error) {
 		log.Printf("start publisher")
 		return workerPublisher(*hosts, *topic, *batchSize, dataChan)
 	})
@@ -110,4 +110,4 @@ func workerPublisher(hosts string, topic string, batchSize int, dataChan chan st
             batch = []string{}
 		}
 	}
-}
+}   
