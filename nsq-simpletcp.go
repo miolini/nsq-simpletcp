@@ -22,6 +22,7 @@ var (
 	topic      = flag.String("t", "t-simpletcp", "send all messages to this nsq topic")
 	batchSize  = flag.Int("b", 1000, "batch size to publish")
 	cpus       = flag.Int("c", runtime.NumCPU(), "max using cpu cores")
+	publishers = flag.Int("p", 2, "connection numbers to eash nsqd node")
 	decompress = flag.Bool("d", false, "enable gzip decompress of incoming data")
 	pidFile    = flag.String("pidfile", "", "path to pid file")
 )
@@ -35,28 +36,43 @@ func main() {
 	log.Printf("hosts:      %s", *hosts)
 	log.Printf("topic:      %s", *topic)
 	log.Printf("batchSize:  %d", *batchSize)
-	log.Printf("decompress: %s", *decompress)
+	log.Printf("cpus:       %d", *cpus)
+	log.Printf("publishers: %d", *publishers)
+	log.Printf("decompress: %b", *decompress)
 	log.Printf("pidfile:    %s", *pidFile)
 
+	runtime.GOMAXPROCS(*cpus)
 	godaemon.WritePidFile(*pidFile)
-
 	dataChan := make(chan string, 1000)
+	statChan := NewStatCounter("batchs", 1)
 
-	godaemon.NewWorker("listener", 1, time.Second).Start(func(worker *godaemon.Worker) (err error) {
-		log.Printf("start listener on %s")
-		return workerListener(*listenAddr, dataChan, *decompress)
+	godaemon.NewWorker("listener", 1, time.Millisecond).Start(func(worker *godaemon.Worker) (err error) {
+		log.Printf("start listener on %s", *listenAddr)
+		return workerListener(*listenAddr, dataChan, *decompress, *batchSize)
 	})
 
-	godaemon.NewWorker("publisher", cpus, time.Second).Start(func(worker *godaemon.Worker) (err error) {
-		log.Printf("start publisher")
-		return workerPublisher(*hosts, *topic, *batchSize, dataChan)
-	})
+	hostList := strings.Split(*hosts, ",")
+	for _, host := range hostList {
+		runWorkerPublisher(host, *topic, dataChan, *publishers)
+	}
 
 	<-make(chan bool)
 }
 
-func readClient(reader io.Reader, dataChan chan string, compress bool) {
-	var scanner *bufio.Scanner
+func runWorkerPublisher(host, topic string, dataChan chan string, publishers int) {
+	godaemon.NewWorker("publisher", publishers, time.Second * 15).Start(func(worker *godaemon.Worker) (err error) {
+		log.Printf("start publisher to %s", host)
+		return workerPublisher(host, topic, dataChan)
+	})
+}
+
+func readClient(reader io.Reader, dataChan chan string, compress bool, batchSize int) {
+	var (
+		scanner *bufio.Scanner
+		line    string
+		batch   string
+		counter int
+	)
 	if compress {
 		gzipReader, err := gzip.NewReader(reader)
 		if err != nil {
@@ -68,15 +84,23 @@ func readClient(reader io.Reader, dataChan chan string, compress bool) {
 		scanner = bufio.NewScanner(reader)
 	}
 	for scanner.Scan() {
-		dataChan <- scanner.Text()
+		line = scanner.Text()
+		batch += line + "\n"
+		counter++
+		if counter < batchSize {
+			continue
+		}
+		dataChan <- batch
+		counter = 0
+		batch = ""
 	}
 }
 
-func workerListener(addr string, dataChan chan string, compress bool) (err error) {
-    var (
-        listener net.Listener
-        conn net.Conn
-    )
+func workerListener(addr string, dataChan chan string, compress bool, batchSize int) (err error) {
+	var (
+		listener net.Listener
+		conn     net.Conn
+	)
 	if listener, err = net.Listen("tcp", addr); err != nil {
 		return
 	}
@@ -85,29 +109,51 @@ func workerListener(addr string, dataChan chan string, compress bool) (err error
 			return
 		}
 		log.Printf("new connection")
-		go readClient(conn, dataChan, compress)
+		go readClient(conn, dataChan, compress, batchSize)
 	}
 }
 
-func workerPublisher(hosts string, topic string, batchSize int, dataChan chan string) (err error) {
+func workerPublisher(hosts string, topic string, dataChan chan string) (err error) {
 	config := nsq.NewConfig()
-    w, err := nsq.NewProducer(hosts, config)
-    if err != nil {
-        return
-    }
-    var batch []string
+	w, err := nsq.NewProducer(hosts, config)
+	if err != nil {
+		return
+	}
 	for {
 		select {
 		case data := <-dataChan:
-            batch = append(batch, data)
-            if len(batch) < batchSize {
-                continue
-            }
-            err = w.Publish(topic, []byte(strings.Join(batch, "\n")))
-            if err != nil {
-                return
-            }
-            batch = []string{}
+			err = w.Publish(topic, []byte(data))
+			if err != nil {
+				go func(msg string) {
+					dataChan <- msg
+				}(data)
+				return
+			}
 		}
 	}
-}   
+}
+
+func NewStatCounter(label string, interval int) (chan int) {
+    statChan := make(chan int)
+    counter := 0
+    timer := time.Now()
+    mutex := sync.Mutex{}
+    go func() {
+        for volume := range statChan {
+            mutex.Lock()
+            counter += volume
+            mutex.Unlock()
+        }
+    }()
+    go func () {
+        for {
+            mutex.Lock()
+            log.Printf("speed %s %d msg/sec", label, counter / interval)
+            counter = 0
+            timer = time.Now()
+            mutex.Unlock()
+            time.Sleep(time.Second * time.Duration(interval))
+        }
+    }()
+    return statChan
+}
