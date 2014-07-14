@@ -125,10 +125,13 @@ func workerPublisher(hosts string, topic string, dataChan chan []byte, statChan 
 	for {
 		select {
 		case data := <-dataChan:
+			ts := time.Now()
 			compressed, err = snappy.Encode(nil, data)
+			elapsed := time.Since(ts)
 			lenData := len(data)
 			lenCompressed := len(compressed)
-			log.Printf("batch compression: %d => %d, ratio %.2f", lenData, lenCompressed, float64(lenData) / float64(lenCompressed))
+			log.Printf("batch compression: %d => %d, ratio %.2f, elapsed %s", 
+				lenData, lenCompressed, float64(lenData) / float64(lenCompressed), elapsed.String())
 			if err == nil {
 				err = w.Publish(topic, compressed)
 			}
