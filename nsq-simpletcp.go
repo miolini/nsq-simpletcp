@@ -50,7 +50,9 @@ func main() {
 
 	godaemon.NewWorker("listener", 1, time.Millisecond).Start(func(worker *godaemon.Worker) (err error) {
 		log.Printf("start listener on %s", *listenAddr)
-		return workerListener(*listenAddr, dataChan, *decompress, *batchSize)
+		err = workerListener(*listenAddr, dataChan, *decompress, *batchSize)
+		panic(err)
+		return
 	})
 
 	hostList := strings.Split(*hosts, ",")
