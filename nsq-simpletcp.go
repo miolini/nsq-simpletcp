@@ -11,6 +11,8 @@ import "compress/gzip"
 import "runtime"
 import nsq "github.com/bitly/go-nsq"
 import "strings"
+import "code.google.com/p/snappy-go/snappy"
+import "sync"
 
 const (
 	RECV_BUF_LEN = 2048
@@ -43,8 +45,8 @@ func main() {
 
 	runtime.GOMAXPROCS(*cpus)
 	godaemon.WritePidFile(*pidFile)
-	dataChan := make(chan string, 1000)
-	statChan := NewStatCounter("batchs", 1)
+	dataChan := make(chan []byte, 10)
+	statChan := NewStatCounter("batches", 1)
 
 	godaemon.NewWorker("listener", 1, time.Millisecond).Start(func(worker *godaemon.Worker) (err error) {
 		log.Printf("start listener on %s", *listenAddr)
@@ -53,24 +55,24 @@ func main() {
 
 	hostList := strings.Split(*hosts, ",")
 	for _, host := range hostList {
-		runWorkerPublisher(host, *topic, dataChan, *publishers)
+		runWorkerPublisher(host, *topic, dataChan, *publishers, statChan)
 	}
 
 	<-make(chan bool)
 }
 
-func runWorkerPublisher(host, topic string, dataChan chan string, publishers int) {
+func runWorkerPublisher(host, topic string, dataChan chan []byte, publishers int, statChan chan int) {
 	godaemon.NewWorker("publisher", publishers, time.Second * 15).Start(func(worker *godaemon.Worker) (err error) {
 		log.Printf("start publisher to %s", host)
-		return workerPublisher(host, topic, dataChan)
+		return workerPublisher(host, topic, dataChan, statChan)
 	})
 }
 
-func readClient(reader io.Reader, dataChan chan string, compress bool, batchSize int) {
+func readClient(reader io.Reader, dataChan chan []byte, compress bool, batchSize int) {
 	var (
 		scanner *bufio.Scanner
 		line    string
-		batch   string
+		batch   []byte
 		counter int
 	)
 	if compress {
@@ -85,18 +87,18 @@ func readClient(reader io.Reader, dataChan chan string, compress bool, batchSize
 	}
 	for scanner.Scan() {
 		line = scanner.Text()
-		batch += line + "\n"
+		batch = append(batch, []byte(line)...)
 		counter++
 		if counter < batchSize {
 			continue
 		}
 		dataChan <- batch
 		counter = 0
-		batch = ""
+		batch = []byte{}
 	}
 }
 
-func workerListener(addr string, dataChan chan string, compress bool, batchSize int) (err error) {
+func workerListener(addr string, dataChan chan []byte, compress bool, batchSize int) (err error) {
 	var (
 		listener net.Listener
 		conn     net.Conn
@@ -113,7 +115,8 @@ func workerListener(addr string, dataChan chan string, compress bool, batchSize 
 	}
 }
 
-func workerPublisher(hosts string, topic string, dataChan chan string) (err error) {
+func workerPublisher(hosts string, topic string, dataChan chan []byte, statChan chan int) (err error) {
+	var compressed []byte
 	config := nsq.NewConfig()
 	w, err := nsq.NewProducer(hosts, config)
 	if err != nil {
@@ -122,13 +125,17 @@ func workerPublisher(hosts string, topic string, dataChan chan string) (err erro
 	for {
 		select {
 		case data := <-dataChan:
-			err = w.Publish(topic, []byte(data))
+			compressed, err = snappy.Encode(nil, data)
+			if err == nil {
+				err = w.Publish(topic, compressed)
+			}
 			if err != nil {
-				go func(msg string) {
+				go func(msg []byte) {
 					dataChan <- msg
 				}(data)
 				return
 			}
+			statChan <- 1
 		}
 	}
 }
