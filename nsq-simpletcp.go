@@ -126,6 +126,9 @@ func workerPublisher(hosts string, topic string, dataChan chan []byte, statChan 
 		select {
 		case data := <-dataChan:
 			compressed, err = snappy.Encode(nil, data)
+			lenData := len(data)
+			lenCompressed := len(compressed)
+			log.Printf("batch compression: %d => %d, ratio %.2f", lenData, lenCompressed, float64(lenData) / float64(lenCompressed))
 			if err == nil {
 				err = w.Publish(topic, compressed)
 			}
