@@ -87,9 +87,11 @@ func readClient(reader io.Reader, dataChan chan []byte, compress bool, batchSize
 	} else {
 		scanner = bufio.NewScanner(reader)
 	}
+	sep := []byte("\n")
 	for scanner.Scan() {
 		line = scanner.Text()
 		batch = append(batch, []byte(line)...)
+		batch = append(batch, sep)
 		counter++
 		if counter < batchSize {
 			continue
