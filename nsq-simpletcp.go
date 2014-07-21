@@ -91,9 +91,9 @@ func readClient(reader io.Reader, dataChan chan []byte, compress bool, batchSize
 	for scanner.Scan() {
 		line = scanner.Text()
 		batch = append(batch, []byte(line)...)
-		batch = append(batch, sep)
 		counter++
 		if counter < batchSize {
+			batch = append(batch, sep)
 			continue
 		}
 		dataChan <- batch
